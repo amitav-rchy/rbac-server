@@ -1,0 +1,281 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Core Models
+enum UserRole {
+  ADMIN
+  MANAGER
+  AGENT
+  CUSTOMER
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+  INACTIVE
+}
+
+enum AuditAction {
+  USER_CREATED
+  USER_UPDATED
+  USER_BANNED
+  USER_SUSPENDED
+  USER_ACTIVATED
+  USER_PASSWORD_RESET
+  PERMISSION_GRANTED
+  PERMISSION_REVOKED
+  ROLE_CHANGED
+  LOGIN
+  LOGOUT
+  REFRESH_TOKEN
+}
+
+// User Model
+model User {
+  id                    String                 @id @default(cuid())
+  email                 String                 @unique
+  username              String                 @unique
+  password              String
+  firstName             String?
+  lastName              String?
+  role                  UserRole               @default(AGENT)
+  status                UserStatus             @default(ACTIVE)
+  managerId             String?
+  manager               User?                  @relation("ManagerToEmployee", fields: [managerId], references: [id], onDelete: SetNull)
+  employees             User[]                 @relation("ManagerToEmployee")
+  
+  // Permissions and Roles
+  roleId                String?
+  assignedRole          Role?                  @relation(fields: [roleId], references: [id], onDelete: SetNull)
+  userPermissions       UserPermission[]
+  
+  // Sessions and Audit
+  sessions              Session[]
+  auditLogsAsActor      AuditLog[]             @relation("ActorUser")
+  auditLogsAsTarget     AuditLog[]             @relation("TargetUser")
+  
+  // Data Relations
+  leads                 Lead[]
+  tasks                 Task[]
+  reports               Report[]
+  
+  // Metadata
+  lastLoginAt           DateTime?
+  loginAttempts         Int                    @default(0)
+  lastLoginAttemptAt    DateTime?
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+
+  @@index([managerId])
+  @@index([roleId])
+  @@index([email])
+}
+
+// Role Model
+model Role {
+  id                    String                 @id @default(cuid())
+  name                  String                 @unique
+  description           String?
+  hierarchy             Int                    @default(0) // 0=Customer, 1=Agent, 2=Manager, 3=Admin
+  
+  // Relationships
+  permissions           RolePermission[]
+  users                 User[]
+  
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+
+  @@index([hierarchy])
+}
+
+// Permission Model
+model Permission {
+  id                    String                 @id @default(cuid())
+  name                  String                 @unique // e.g., "view_dashboard", "manage_users"
+  description           String?
+  category              String?                // e.g., "users", "reports", "dashboard"
+  isSystem              Boolean                @default(false) // System permissions cannot be deleted
+  
+  // Relationships
+  rolePermissions       RolePermission[]
+  userPermissions       UserPermission[]
+  
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+
+  @@index([category])
+}
+
+// Role-Permission Junction
+model RolePermission {
+  id                    String                 @id @default(cuid())
+  roleId                String
+  role                  Role                   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permissionId          String
+  permission            Permission             @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  
+  createdAt             DateTime               @default(now())
+
+  @@unique([roleId, permissionId])
+  @@index([roleId])
+  @@index([permissionId])
+}
+
+// User-Permission Junction (Overrides)
+model UserPermission {
+  id                    String                 @id @default(cuid())
+  userId                String
+  user                  User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permissionId          String
+  permission            Permission             @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  
+  // Override flag: true = grant, false = revoke
+  isGranted             Boolean                @default(true)
+  grantedBy             String?                // User ID of who granted this
+  reason                String?
+  
+  createdAt             DateTime               @default(now())
+  revokedAt             DateTime?
+
+  @@unique([userId, permissionId])
+  @@index([userId])
+  @@index([permissionId])
+}
+
+// Session Model
+model Session {
+  id                    String                 @id @default(cuid())
+  userId                String
+  user                  User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  refreshToken          String                 @unique
+  refreshTokenHash      String?                // Hash of refresh token for security
+  accessToken           String?                // Cache of current access token
+  
+  ipAddress             String?
+  userAgent             String?
+  
+  isValid               Boolean                @default(true)
+  expiresAt             DateTime
+  revokedAt             DateTime?
+  
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// Audit Log Model
+model AuditLog {
+  id                    String                 @id @default(cuid())
+  action                AuditAction
+  
+  actorId               String?
+  actor                 User?                  @relation("ActorUser", fields: [actorId], references: [id], onDelete: SetNull)
+  
+  targetId              String?
+  target                User?                  @relation("TargetUser", fields: [targetId], references: [id], onDelete: SetNull)
+  
+  resourceType          String?                // e.g., "User", "Permission", "Role"
+  resourceId            String?
+  
+  metadata              String?                // JSON metadata
+  ipAddress             String?
+  userAgent             String?
+  status                String                 @default("success") // success, failure
+  errorMessage          String?
+  
+  createdAt             DateTime               @default(now())
+
+  @@index([actorId])
+  @@index([targetId])
+  @@index([action])
+  @@index([createdAt])
+  @@index([resourceType])
+}
+
+// Lead Model
+model Lead {
+  id                    String                 @id @default(cuid())
+  title                 String
+  description           String?
+  email                 String?
+  phone                 String?
+  status                String                 @default("new") // new, qualified, contacted, converted, lost
+  
+  assignedToId          String?
+  assignedTo            User?                  @relation(fields: [assignedToId], references: [id], onDelete: SetNull)
+  
+  source                String?                // e.g., "web", "email", "referral"
+  value                 Float?
+  
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+
+  @@index([assignedToId])
+  @@index([status])
+}
+
+// Task Model
+model Task {
+  id                    String                 @id @default(cuid())
+  title                 String
+  description           String?
+  status                String                 @default("todo") // todo, in_progress, done, cancelled
+  priority              String                 @default("medium") // low, medium, high, urgent
+  
+  assignedToId          String?
+  assignedTo            User?                  @relation(fields: [assignedToId], references: [id], onDelete: SetNull)
+  
+  dueDate               DateTime?
+  completedAt           DateTime?
+  
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+
+  @@index([assignedToId])
+  @@index([status])
+  @@index([dueDate])
+}
+
+// Report Model
+model Report {
+  id                    String                 @id @default(cuid())
+  title                 String
+  description           String?
+  reportType            String                 // e.g., "sales", "leads", "tasks"
+  
+  generatedBy           String?
+  generatedByUser       User?                  @relation(fields: [generatedBy], references: [id], onDelete: SetNull)
+  
+  data                  String?                // JSON data
+  format                String                 @default("pdf") // pdf, excel, json
+  
+  generatedAt           DateTime               @default(now())
+
+  @@index([generatedBy])
+  @@index([reportType])
+}
+
+// Settings Model
+model Settings {
+  id                    String                 @id @default(cuid())
+  key                   String                 @unique
+  value                 String?
+  description           String?
+  type                  String                 @default("string") // string, number, boolean, json
+  
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+}
